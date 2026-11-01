@@ -60,6 +60,7 @@ local function initializeRedstoneMap(side) -- 首次开机时调用一次，用�
             end
         end
     end
+    er("无法识别方向") -- 探测失败时停止，避免其它协程永久等待映射
 end
 local function redstone_setOutput(side, value)
     if redstone_getOutput[side] ~= value then -- 减少组件API的调用，降低阻塞
@@ -167,13 +168,13 @@ local function cycle(side)
             needReplace[#needReplace+1] = slot
         end
         -- 停机并等待1秒
-        if redstone_setOutput(side, 0) then
-            local wakeTime = computer_uptime() + 1 -- computer.uptime 的计算基于游戏tick，不必担忧tps引发的同步问题
-            while computer_uptime() < wakeTime do
-                coroutine_yield()
-            end
-        else
+        if not redstone_setOutput(side, 0) then
             update() -- 更换过但是检查不通过，需要重新检查
+        end
+        -- 主循环可能刚刚统一关闭输出并清空缓存，仍必须等待反应堆停机。
+        local wakeTime = computer_uptime() + 1 -- uptime 基于游戏 tick，低 TPS 时也会等待完整一秒
+        while computer_uptime() < wakeTime do
+            coroutine_yield()
         end
         -- 更换燃料棒与冷却单元
         for _, slot in ipairs(needReplace) do
@@ -213,49 +214,53 @@ local coolantCellList = { [prefix.."60k_Helium"..suffix]=6, [prefix.."180k_Heliu
                             [prefix.."60k_NaK"..suffix]=6, [prefix.."180k_NaK"..suffix]=18, [prefix.."360k_NaK"..suffix]=36,
                             [prefix.."180k_Space"..suffix]=18, [prefix.."360k_Space"..suffix]=36, [prefix.."540k_Space"..suffix]=54,
                             [prefix.."1080k_Space"..suffix]=108, [prefix.."neutroniumHeatCapacitor"]=1e5 }--索引为冷却单元id，值为其热容的万分之一
+-- 先识别模式，再读取物品，避免 ME 接口以外的容器污染燃料类型和混合棒状态。
+local containers = {}
 for i=0,5 do
-    local function checkContainer() -- 将容器方向信息添加到fuelRodSlot
-        local info, emptySlotCount = transposer_getAllStacks(i), 0
-        for j=1,info.count() do
-            local stack = info()
-            local name = stack.name
-            if fuelRodList[name] then -- 燃料棒分支
-                if fuelRod and fuelRod ~= name then
-                    if fuelRodList[fuelRod] + fuelRodList[name] == 1250 then -- 额外引入对“核心”-激发钚/激发铀混合布局的支持
-                        mixedFuelRod = name
-                        if fuelRodList[fuelRod] < fuelRodList[mixedFuelRod] then
-                            fuelRod, mixedFuelRod = mixedFuelRod, fuelRod -- 确保fuelRod是“核心”的物品id
-                        end
-                    else
-                        er("不支持的混合"..FUELROD)
-                    end
-                end
-                fuelRod, fuelRodSlot[i] = mixedFuelRod and fuelRod or name, {}
-            elseif coolantCellList[name] and stack.damage < 70 then -- 冷却单元分支
-                if coolantCell and coolantCell ~= name then
-                    er("必须为一种"..COOLANTCELL)
-                end
-                coolantCell, fuelRodSlot[i] = name, {}
-            else
-                emptySlotCount = emptySlotCount + 1
-            end
-        end
-        return emptySlotCount == info.count() -- 是否可以作为输出容器
-    end
-    local name = transposer_getInventorySize(i) ~= 0 and transposer.getInventoryName(i) -- 物品栏大小一定要大于0这一块，点名AE2和GT
-    if name == "blockReactorChamber" then -- 核反应仓分支
-        if transposer_getInventorySize(i) < 54 then
+    local size = transposer_getInventorySize(i)
+    local name = size and size > 0 and transposer.getInventoryName(i)
+    if name == "blockReactorChamber" then
+        if size < 54 then
             er("必须为六仓反应堆")
         end
-        reactors[i] = {side=i}
-    elseif name == "tile.appliedenergistics2.BlockInterface" or name == "tile.fluid_interface" then -- ME接口分支
+        reactors[i] = 1
+    elseif name == "tile.appliedenergistics2.BlockInterface" or name == "tile.fluid_interface" then
         if isMEInterfaceMode then
             er("存在多个ME接口")
         end
-        isMEInterfaceMode, fuelRodSlot, fuelRod, coolantCell = 0, {} -- 重置其它容器的信息
-        checkContainer()
-        sideOutput = i
-    elseif name and not isMEInterfaceMode and checkContainer() then -- 输出容器分支
+        isMEInterfaceMode, sideOutput = 0, i
+    elseif name then
+        containers[i] = 1
+    end
+end
+if isMEInterfaceMode then
+    containers = {[sideOutput]=1}
+end
+for i in pairs(containers) do
+    local info = transposer_getAllStacks(i)
+    for j=1,info.count() do
+        local stack = info()
+        local name = stack.name
+        if fuelRodList[name] then -- 燃料棒分支
+            if fuelRod and fuelRod ~= name and mixedFuelRod ~= name then
+                if not mixedFuelRod and fuelRodList[fuelRod] + fuelRodList[name] == 1250 then -- 仅允许“核心”与一种激发棒混用
+                    mixedFuelRod = name
+                    if fuelRodList[fuelRod] < fuelRodList[mixedFuelRod] then
+                        fuelRod, mixedFuelRod = mixedFuelRod, fuelRod -- 确保fuelRod是“核心”的物品id
+                    end
+                else
+                    er("不支持的混合"..FUELROD)
+                end
+            end
+            fuelRod, fuelRodSlot[i] = mixedFuelRod and fuelRod or name, {}
+        elseif coolantCellList[name] and stack.damage < 70 then -- 冷却单元分支
+            if coolantCell and coolantCell ~= name then
+                er("必须为一种"..COOLANTCELL)
+            end
+            coolantCell, fuelRodSlot[i] = name, {}
+        end
+    end
+    if not fuelRodSlot[i] and not isMEInterfaceMode then
         sideOutput = i
     end
 end

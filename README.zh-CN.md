@@ -61,14 +61,28 @@
 
 # 代码压缩过程
 
+安装 Python 3 和 `luamin`（`npm install -g luamin@1.0.4`），然后执行
+`python compress.py`。可用 `--luamin <路径>` 指定可执行文件。
+构建会按 UTF-8 字节数检查 4096 字节的 EEPROM 容量限制，仅在成功后替换
+`nuclear.lua`。若压缩输入含保留标记字符则报错，避免静默改变程序内容。
+
+组件模拟与压缩回归测试：
+
+```sh
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests
+```
+
+模拟会在 Lua 5.2、5.3 和 5.4 中运行源码及 EEPROM 代码，不能代替游戏内实测。
+
 ## 1.luamin
 
 使用 luamin 进行混淆，将所有局部变量重命名为单字母与双字母。
 
 ## 2.后续处理
 
-将 luamin 混淆过的代码中的`function`、`return`、`then `、`local `、`end`分别替换为`&@`、`@&`、`$`、`&`、`@`，将替换后的文本填充进如下代码
+将 luamin 混淆过的代码中的`function`、`return`、`then `、`local `、`end`分别替换为`!`、`?`、`$`、`&`、`@`，将替换后的文本填充进如下代码。使用单字符标记可避免把字符串中的 `local end` 错误还原成 `function`。
 
 ~~~lua
-local t='替换过的文本';load(t:gsub("&@","function"):gsub("@&","return"):gsub("%$","then "):gsub("&","local "):gsub("@","end"))()
+load(('替换过的文本'):gsub("!","function"):gsub("%?","return"):gsub("%$","then "):gsub("&","local "):gsub("@","end"))()
 ~~~

@@ -1,79 +1,64 @@
+"""Build the EEPROM image without overwriting it on a failed build."""
+import argparse
 import os
+from pathlib import Path
+import shutil
 import subprocess
-import sys
+import tempfile
 
-# 文件路径
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-source_file = os.path.join(BASE_DIR, "nuclear_SourceCode.lua")
-for_luamin_file = os.path.join(BASE_DIR, "nuclear_ForLuamin.lua")
-final_file = os.path.join(BASE_DIR, "nuclear.lua")
+BASE_DIR = Path(__file__).resolve().parent
+EEPROM_SIZE = 4096
 
-def step1_preprocess():
-    """读取源文件，执行文本替换，保存到中间文件"""
-    with open(source_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    # 替换规则（顺序敏感，逐个替换）
-    replacements = []
-        #("side", "a"),
-        #(".wakeTime", ".b"),
-        #(".task", ".c"),
-        #("check", "d"),
-        #("replace", "e"),
-        #(".sleep", ".f"),
-        #(":sleep", ":f"),
-        #(".ready", ".g")
-    #]
-    
-    for old, new in replacements:
-        content = content.replace(old, new)
-    
-    with open(for_luamin_file, 'w', encoding='utf-8') as f:
-        f.write(content)
-    print("Step 1 完成：已生成预处理文件 nuclear_ForLuamin.lua")
 
-def step2_luamin():
-    """调用 luamin 混淆，生成 nuclear.lua"""
-    cmd = f'luamin -f "{for_luamin_file}" > "{final_file}"'
-    print(f"Step 2 执行命令: {cmd}")
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        print("luamin 执行失败:", result.stderr)
-        sys.exit(1)
-    print("Step 2 完成：luamin 已生成 nuclear.lua")
+def encode(minified):
+    # The Lua decoder also replaces markers inside strings. Reject collisions
+    # rather than silently changing literals or Lua 5.3 operators.
+    if any(marker in minified for marker in ("!", "?", "&", "@", "$")):
+        raise ValueError("Source contains reserved compression markers: !, ?, &, @ or $")
+    replaced = minified
+    for old, new in (("function", "!"), ("return", "?"), ("then ", "$"),
+                     ("local ", "&"), ("end", "@")):
+        replaced = replaced.replace(old, new)
+    escaped = (replaced.replace("\\", "\\\\").replace("'", "\\'")
+               .replace("\r", "\\r").replace("\n", "\\n"))
+    return (f"load(('{escaped}'):gsub(\"!\",\"function\")"
+            ':gsub("%?","return"):gsub("%$","then ")'
+            ':gsub("&","local "):gsub("@","end"))()')
 
-def step3_postprocess():
-    """读取 nuclear.lua，替换关键字，包裹后写回"""
-    with open(final_file, 'r', encoding='utf-8') as f:
-        obfuscated = f.read()
-    
-    # 删除末尾的换行符
-    obfuscated = obfuscated.rstrip('\n')
-    
-    # 将 function、return、then、local、end 替换为 &@、@&、$、&、@
-    replaced = obfuscated.replace("function", "&@").replace("return", "@&").replace("then ", "$").replace("local ", "&").replace("end", "@")
-    
-    # 转义替换后文本中的单引号和反斜杠，使其能安全嵌入到单引号字符串中
-    safe_replaced = replaced.replace("\\", "\\\\").replace("'", "\\'")
-    
-    # 按模板生成最终代码
-    final_code = f"local t='{safe_replaced}';load(t:gsub(\"&@\",\"function\"):gsub(\"@&\",\"return\"):gsub(\"%$\",\"then \"):gsub(\"&\",\"local \"):gsub(\"@\",\"end\"))()"
-    
-    with open(final_file, 'w', encoding='utf-8') as f:
-        f.write(final_code)
-    print("Step 3 完成：已封装最终代码到 nuclear.lua")
 
-def cleanup():
-    """删除中间文件"""
+def build(luamin="luamin", source=None, destination=None):
+    source = Path(source) if source is not None else BASE_DIR / "nuclear_SourceCode.lua"
+    destination = Path(destination) if destination is not None else BASE_DIR / "nuclear.lua"
+    executable = shutil.which(luamin) or luamin
+    # luamin's file mode treats piped stdin as another filename, even if empty.
+    result = subprocess.run([executable, "-c"], input=source.read_text(encoding="utf-8"),
+                            capture_output=True, text=True, encoding="utf-8", check=True)
+    minified = result.stdout.rstrip("\r\n")
+    if not minified:
+        raise ValueError("luamin produced no code")
+    code = encode(minified).encode("utf-8")
+    if len(code) > EEPROM_SIZE:
+        raise ValueError(f"EEPROM image is {len(code)} bytes; limit is {EEPROM_SIZE}")
+
+    temporary = None
     try:
-        os.remove(for_luamin_file)
-        print("清理完成：已删除 nuclear_ForLuamin.lua")
-    except FileNotFoundError:
-        pass
+        with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
+            temporary = output.name
+            output.write(code)
+        os.replace(temporary, destination)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.remove(temporary)
+    return len(code)
+
 
 if __name__ == "__main__":
-    step1_preprocess()
-    step2_luamin()
-    step3_postprocess()
-    cleanup()
-    print("全部任务完成！")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--luamin", default="luamin", help="Path to the luamin executable")
+    args = parser.parse_args()
+    try:
+        size = build(args.luamin)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        detail = getattr(error, "stderr", "") or getattr(error, "stdout", "") or ""
+        parser.exit(1, f"Build failed: {error}\n{detail}")
+    print(f"Built nuclear.lua: {size}/{EEPROM_SIZE} bytes")
