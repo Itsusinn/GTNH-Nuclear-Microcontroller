@@ -22,6 +22,19 @@ local fuelRodSlot, mixedFuelRodSlot, coolantCellSlot, reactors, fuelRod, mixedFu
 
 local redstoneMap, initializingMap = {1,[0]=0} -- 将转运器使用的绝对方向(东南西北)映射为红石卡使用的相对方向(前后左右)
 local redstone_getOutput = {0,0,0,0,0,[0]=0} -- 已设置的红石输出值
+local function waitSecond()
+    local deadline = computer_uptime() + 1
+    while computer_uptime() < deadline do
+        coroutine_yield()
+    end
+end
+local function retryAfterSecond(attempt, message)
+    if attempt == 3 then
+        er(message)
+    end
+    waitSecond()
+    return attempt + 1
+end
 local function initializeRedstoneMap(side) -- 首次开机时调用一次，用于完成redstoneMap的初始化
     if initializingMap then
         initializingMap[side] = 1
@@ -46,10 +59,7 @@ local function initializeRedstoneMap(side) -- 首次开机时调用一次，用�
     end
     for i = 5,2,-1 do -- 优先探测左侧与右侧
         raw_redstone_setOutput(i, 1)
-        local wt = computer_uptime() + 1
-        while computer_uptime() < wt do
-            coroutine_yield()
-        end
+        waitSecond()
         raw_redstone_setOutput(i, 0)
         for j = 2,5 do
             if reactors[j] and transposer_getStackInSlot(j, 1).tag ~= tags[j] then
@@ -100,9 +110,7 @@ local function update()
             end
         end
     end
-    if isMEInterfaceMode == 0 then
-        er("ME接口已满")
-    end
+    -- 0 表示 ME 接口暂无空槽，由换料循环等待并重试。
 end
 
 local FUELROD, COOLANTCELL, LACK = "燃料棒", "冷却单元", "缺少"
@@ -125,13 +133,16 @@ local function getItem(slot, retry)
             end
         end
     end
-    update() -- 仅当快照中不存在所需物品时才调用组件 API 进行更新
-    if retry then
-        -- er(LACK..(isCoolant[slot] and COOLANTCELL or FUELROD))
+    if not retry then -- 首先刷新一次快照，确认确实缺料，不消耗重试次数
+        retry = 0
+    elseif isCoolant[slot] then
+        retry = retryAfterSecond(retry, LACK..COOLANTCELL)
+    else
         raw_redstone_setOutput({0,0,0,0,0,[0]=0})
         c2.shutdown(1) -- 重启
     end
-    return getItem(slot, 1)
+    update()
+    return getItem(slot, retry)
 end
 
 
@@ -172,21 +183,21 @@ local function cycle(side)
             update() -- 更换过但是检查不通过，需要重新检查
         end
         -- 主循环可能刚刚统一关闭输出并清空缓存，仍必须等待反应堆停机。
-        local wakeTime = computer_uptime() + 1 -- uptime 基于游戏 tick，低 TPS 时也会等待完整一秒
-        while computer_uptime() < wakeTime do
-            coroutine_yield()
-        end
+        waitSecond() -- uptime 基于游戏 tick，低 TPS 时也会等待完整一秒
         -- 更换燃料棒与冷却单元
         for _, slot in ipairs(needReplace) do
+            local attempt = 0
+            while hasItem[slot] do
+                -- ME 模式的 0 表示无空槽，不能把它作为目标槽位传入组件 API。
+                if isMEInterfaceMode ~= 0 and transposer_transferItem(table.unpack({side, sideOutput, 1, slot, isMEInterfaceMode})) > 0 then
+                    hasItem[slot] = nil
+                else
+                    attempt = retryAfterSecond(attempt, "输出空间不足")
+                    update()
+                end
+            end
             ::RETRY::
             local _side, _slot = getItem(slot)
-            if hasItem[slot] then -- hasItem 的作用是在这里节省一次可能的组件API调用
-                if transposer_transferItem(table.unpack({side, sideOutput, 1, slot, isMEInterfaceMode})) < 1 then -- 第五个参数显式传入 nil 会引发报错
-                    update()
-                    goto RETRY
-                end
-                hasItem[slot] = nil
-            end
             if transposer_transferItem(_side, side, 1, _slot, slot) < 1 then
                 update()
                 goto RETRY -- goto 相比 break 而言，组件 API 调用次数更少
@@ -210,10 +221,12 @@ local fuelRodList = { [prefix.."rodThorium4"]=4, [prefix.."rodUranium4"]=13, [pr
                         [prefix.."rodMOX4"]=13, [prefix.."rodHighDensityPlutonium4"]=13, [prefix.."rodNaquadria4"]=13,
                         [prefix.."rodNaquadah32"]=1050, [prefix.."rodTiberium4"]=13, [prefix.."rodExcitedUranium4"]=200,
                         [prefix.."rodExcitedPlutonium4"]=200 }--索引为燃料棒id，值为第26槽冷却单元每秒吸收热量的百分之一（向上取整）
-local coolantCellList = { [prefix.."60k_Helium"..suffix]=6, [prefix.."180k_Helium"..suffix]=18, [prefix.."360k_Helium"..suffix]=36,
-                            [prefix.."60k_NaK"..suffix]=6, [prefix.."180k_NaK"..suffix]=18, [prefix.."360k_NaK"..suffix]=36,
-                            [prefix.."180k_Space"..suffix]=18, [prefix.."360k_Space"..suffix]=36, [prefix.."540k_Space"..suffix]=54,
-                            [prefix.."1080k_Space"..suffix]=108, [prefix.."neutroniumHeatCapacitor"]=1e5 }--索引为冷却单元id，值为其热容的万分之一
+local coolantCellList = {[prefix.."neutroniumHeatCapacitor"]=1e5}
+for kind, capacities in pairs({Helium={60,180,360},NaK={60,180,360},Space={180,360,540,1080}}) do
+    for _, capacity in ipairs(capacities) do
+        coolantCellList[prefix..capacity.."k_"..kind..suffix] = capacity / 10 -- 热容的万分之一
+    end
+end
 -- 先识别模式，再读取物品，避免 ME 接口以外的容器污染燃料类型和混合棒状态。
 local containers = {}
 for i=0,5 do

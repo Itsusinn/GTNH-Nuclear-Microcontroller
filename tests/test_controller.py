@@ -14,10 +14,11 @@ class ControllerTests(unittest.TestCase):
     runtime = LuaRuntime
     firmware_file = "nuclear_SourceCode.lua"
 
-    def run_scenario(self, scenario):
+    def run_scenario(self, scenario, recovery_attempt=3):
         lua = self.runtime(unpack_returned_tuples=True)
         lua.globals().firmware = (ROOT / self.firmware_file).read_text(encoding="utf-8")
         lua.globals().scenario = scenario
+        lua.globals().recovery_attempt = recovery_attempt
         return lua.execute(HARNESS)
 
     def test_me_ignores_other_container_fuels(self):
@@ -55,6 +56,72 @@ class ControllerTests(unittest.TestCase):
         started = {result.writes[i].side for i in range(1, len(result.writes) + 1)
                    if result.writes[i].value == 1}
         self.assertTrue({3, 4}.issubset(started))
+
+    def assert_retry_intervals(self, times):
+        for earlier, later in zip(times, times[1:]):
+            self.assertGreaterEqual(later - earlier, 1 - 1e-9)
+
+    def assert_never_started(self, result):
+        self.assertFalse(any(result.writes[i].value > 0 for i in range(1, len(result.writes) + 1)))
+
+    def test_full_output_stops_after_three_retries(self):
+        result = self.run_scenario("output_full")
+        self.assertIn("输出空间不足", result.err)
+        attempts = [result.transfers[i] for i in range(1, len(result.transfers) + 1)]
+        self.assertEqual(len(attempts), 4)  # initial attempt, followed by three retries
+        self.assertTrue(all(attempt["from"] == 0 and not attempt.moved for attempt in attempts))
+        self.assert_retry_intervals([attempt.time for attempt in attempts])
+        self.assert_never_started(result)
+
+    def test_output_can_recover_on_each_retry(self):
+        for retry in range(1, 4):
+            with self.subTest(retry=retry):
+                result = self.run_scenario("output_recover", retry)
+                self.assertIn("SIMULATION_DONE", result.err)
+                outgoing = [result.transfers[i] for i in range(1, len(result.transfers) + 1)
+                            if result.transfers[i]["from"] == 0]
+                self.assertEqual(len(outgoing), retry + 1)
+                self.assertEqual(outgoing[-1].moved, 1)
+                self.assert_retry_intervals([attempt.time for attempt in outgoing])
+                self.assertTrue(any(result.writes[i].value == 1 for i in range(1, len(result.writes) + 1)))
+
+    def test_coolant_shortage_stops_after_three_retries(self):
+        result = self.run_scenario("coolant_missing")
+        self.assertIn("缺少冷却单元", result.err)
+        checks = [result.supplyReads[i] for i in range(1, len(result.supplyReads) + 1)
+                  if result.supplyReads[i].time >= result.shortageSince]
+        self.assertEqual(len(checks), 4)
+        self.assertTrue(all(not check.available for check in checks))
+        self.assert_retry_intervals([check.time for check in checks])
+        self.assert_never_started(result)
+
+    def test_coolant_can_recover_on_each_retry(self):
+        for retry in range(1, 4):
+            with self.subTest(retry=retry):
+                result = self.run_scenario("coolant_recover", retry)
+                self.assertIn("SIMULATION_DONE", result.err)
+                incoming = [result.transfers[i] for i in range(1, len(result.transfers) + 1)
+                            if result.transfers[i].to == 0 and result.transfers[i].moved]
+                self.assertEqual(len(incoming), 1)
+                self.assertGreaterEqual(incoming[0].time - result.shortageSince, retry)
+                self.assertTrue(any(result.writes[i].value == 1 for i in range(1, len(result.writes) + 1)))
+
+    def test_full_me_interface_stops_after_three_retries(self):
+        result = self.run_scenario("me_output_full")
+        self.assertIn("输出空间不足", result.err)
+        checks = [result.supplyReads[i].time for i in range(1, len(result.supplyReads) + 1)
+                  if result.supplyReads[i].time > 1]
+        self.assertEqual(len(checks), 3)
+        self.assert_retry_intervals(checks)
+        self.assertEqual(len(result.transfers), 0)
+        self.assert_never_started(result)
+
+    def test_me_interface_recovers_on_third_retry(self):
+        result = self.run_scenario("me_output_recover")
+        self.assertIn("SIMULATION_DONE", result.err)
+        self.assertEqual(len(result.transfers), 2)
+        self.assertGreaterEqual(result.transfers[1].time, 4.05)
+        self.assertTrue(all(result.transfers[i].moved for i in range(1, 3)))
 
 
 class SourceLua53Tests(ControllerTests):

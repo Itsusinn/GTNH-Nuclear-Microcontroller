@@ -36,6 +36,8 @@ Note: The EEPROM has only 4 KB of storage. The source file (`nuclear_SourceCode.
 
 - If an unexpected condition is detected, the program will throw an error and exit, and the front indicator light will flash red.
 
+- During replacement, insufficient output space (including a full ME Interface) or a shortage of usable coolant cells triggers up to three retries after the initial failure, one game-time second apart. The affected reactor stays off while waiting. If the issue persists after the third retry, the program exits with an error; successful replacement is checked again before restarting the reactor.
+
 - The program will not start the nuclear reactor on its own; applying a redstone signal of any strength to the microcontroller will start it.
 
 - The redstone control signal must not be passed directly to the reactor; turning the reactor on and off should be left to the microcontroller.

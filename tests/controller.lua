@@ -2,6 +2,8 @@
 local now, signals, outputs = 0, {}, {[0]=0,0,0,0,0,0}
 local inventories, transfers, writes = {}, {}, {}
 local input, stopped, injected = 0, nil, false
+local supplyReads, shortageSince, replenished = {}, nil, false
+local outputCase, meOutputCase, coolantCase = scenario:match("^output_"), scenario:match("^me_output_"), scenario:match("^coolant_")
 local prefix = "gregtech:gt."
 local coolant = prefix.."neutroniumHeatCapacitor"
 local function stack(name, damage)
@@ -29,6 +31,17 @@ for slot=1,54 do
     rods[slot].size = 1
 end
 inventories[reactorSide] = inventory("blockReactorChamber", 54, rods)
+if outputCase or meOutputCase or coolantCase then
+    rods[26].damage = 100
+end
+if outputCase then
+    for slot=1,8 do inventories[2].items[slot] = stack("junk") end
+end
+if meOutputCase then
+    local items = {stack(fuel), stack(coolant)}
+    for slot=3,9 do items[slot] = stack("junk") end
+    inventories[5] = inventory("tile.appliedenergistics2.BlockInterface", 9, items)
+end
 if scenario == "mapping_multiple" then
     local other = {}
     for slot=1,54 do other[slot] = stack(rods[slot].name) end
@@ -60,6 +73,10 @@ function transposer.getInventoryName(side)
 end
 function transposer.getAllStacks(side)
     local inv, items, index = assert(inventories[side]), {}, 0
+    if (coolantCase and side == 1) or (meOutputCase and side == 5) then
+        supplyReads[#supplyReads+1] = {time=now, available=inv.items[2] ~= nil}
+        if coolantCase and not inv.items[2] and #transfers > 0 and not shortageSince then shortageSince = now end
+    end
     for i=1,inv.size do items[i] = clone(inv.items[i]) end
     return setmetatable({count=function() return inv.size end}, {__call=function()
         index = index + 1
@@ -71,6 +88,7 @@ function transposer.getStackInSlot(side, slot)
 end
 function transposer.transferItem(from, to, count, slot, target)
     transfers[#transfers+1] = {time=now, from=from, to=to, slot=slot}
+    if target and target < 1 then error("invalid target slot") end
     if to == reactorSide and not target then error("missing target") end
     local src, dst = inventories[from].items, inventories[to].items
     if not src[slot] then return 0 end
@@ -78,6 +96,7 @@ function transposer.transferItem(from, to, count, slot, target)
         for i=1,inventories[to].size do if not dst[i] then target=i; break end end
     end
     if not target or dst[target] then return 0 end
+    transfers[#transfers].moved = 1
     dst[target] = clone(src[slot])
     dst[target].size = 1
     src[slot].size = src[slot].size - 1
@@ -115,6 +134,25 @@ computer = {
     shutdown=function() error("UNEXPECTED_REBOOT") end,
     pullSignal=function(timeout)
         now = now + timeout
+        if coolantCase and not injected then
+            source[2], injected = nil, true
+        end
+        if coolantCase and scenario == "coolant_recover" and shortageSince and not replenished
+            and now >= shortageSince + recovery_attempt then
+            source[2], replenished = stack(coolant), true
+        end
+        if scenario == "output_recover" and not replenished then
+            local failed, last = 0, nil
+            for _, transfer in ipairs(transfers) do
+                if transfer.from == reactorSide and not transfer.moved then failed, last = failed + 1, transfer.time end
+            end
+            if failed >= recovery_attempt and now >= last + 1 then
+                inventories[2].items, replenished = {}, true
+            end
+        end
+        if scenario == "me_output_recover" and now >= 4.05 and not replenished then
+            inventories[5].items[9], replenished = nil, true
+        end
         if horizontal and scenario ~= "mapping_failure" then
             for side=3,4 do
                 if outputs[side] > 0 and inventories[side] then
@@ -131,6 +169,7 @@ computer = {
         return table.remove(signals, 1)
     end,
 }
-if scenario == "stop_replace" or horizontal then input = 1 end
+if scenario == "stop_replace" or horizontal or outputCase or meOutputCase or coolantCase then input = 1 end
 local ok, err = pcall(assert(load(firmware)))
-return {ok=ok, err=tostring(err), transfers=transfers, writes=writes, stopped=stopped}
+return {ok=ok, err=tostring(err), transfers=transfers, writes=writes, stopped=stopped,
+    supplyReads=supplyReads, shortageSince=shortageSince, time=now}
