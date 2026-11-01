@@ -63,28 +63,31 @@
 
 # 代码压缩过程
 
-安装 Python 3 和 `luamin`（`npm install -g luamin@1.0.4`），然后执行
-`python compress.py`。可用 `--luamin <路径>` 指定可执行文件。
-构建会按 UTF-8 字节数检查 4096 字节的 EEPROM 容量限制，仅在成功后替换
-`nuclear.lua`。若压缩输入含保留标记字符则报错，避免静默改变程序内容。
+使用 Cargo 单文件脚本，无需 Python、Node.js 或全局安装 `luamin`：
+
+```sh
+rustup toolchain install nightly
+cargo +nightly -Zscript compress.rs
+```
+
+Rust 依赖和版本写在 `compress.rs` 内，首次执行时由 Cargo 下载并编译，后续执行复用缓存。
+默认路径相对于脚本目录；可用 `--source <路径>`、`--output <路径>` 指定输入输出。
+执行 `cargo +nightly -Zscript compress.rs --check` 可以检查固件是否最新，不写入文件。
+
+构建先用 Lua 5.2 编译器检查源码，再通过 `luck_minifier` 缩短局部变量并移除注释与多余空白；
+保持全局名称、数值字面量和计算流程，不进行常量折叠或内联。
+随后自动选择重复文本建立字典，使用源码中不存在的可打印字符作为标记，并在单次 `gsub` 中解码。
+字符串会自动选择较短的安全引号或长括号形式，不再限制源码使用旧的保留字符。
+
+构建会验证解码结果与压缩前文本逐字节一致、检查生成代码的 Lua 5.2 语法，
+并按 UTF-8 字节数检查 4096 字节的 EEPROM 容量。全部通过后才原子替换 `nuclear.lua`，失败时保留旧固件。
 
 组件模拟与压缩回归测试：
 
 ```sh
+cargo +nightly -Zscript test --manifest-path compress.rs
 python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests
 ```
 
 模拟会在 Lua 5.2、5.3 和 5.4 中运行源码及 EEPROM 代码，不能代替游戏内实测。
-
-## 1.luamin
-
-使用 luamin 进行混淆，将所有局部变量重命名为单字母与双字母。
-
-## 2.后续处理
-
-将 luamin 混淆过的代码中的`function`、`return`、`then `、`local `、`end`分别替换为`!`、`?`、`$`、`&`、`@`，将替换后的文本填充进如下代码。使用单字符标记可避免把字符串中的 `local end` 错误还原成 `function`。
-
-~~~lua
-load(('替换过的文本'):gsub("!","function"):gsub("%?","return"):gsub("%$","then "):gsub("&","local "):gsub("@","end"))()
-~~~

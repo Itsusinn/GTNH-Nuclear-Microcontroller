@@ -63,30 +63,33 @@ Note: The EEPROM has only 4 KB of storage. The source file (`nuclear_SourceCode.
 
 # Code Compression Process
 
-Install Python 3 and `luamin` (`npm install -g luamin@1.0.4`), then run
-`python compress.py`. Use `--luamin <path>` to select another executable.
-The build checks the UTF-8 byte size against the 4096-byte EEPROM limit and
-replaces `nuclear.lua` only after success. Reserved marker characters in the
-minified input cause a build error rather than silently changing the program.
+Use a Cargo single-file script; building requires no Python, Node.js or global `luamin` installation:
+
+```sh
+rustup toolchain install nightly
+cargo +nightly -Zscript compress.rs
+```
+
+Dependency versions are embedded in `compress.rs`. Cargo downloads and compiles them on the first run, then reuses its cache.
+Default paths are relative to the script directory. Override them with `--source <path>` and `--output <path>`.
+Run `cargo +nightly -Zscript compress.rs --check` to verify the committed image without writing it.
+
+The build checks source syntax using Lua 5.2, then uses `luck_minifier` to shorten local names and remove comments and unnecessary whitespace.
+Global names, numeric literals and execution flow are preserved; constant folding and inlining are disabled.
+Repeated text is packed into a dictionary with printable markers absent from the source and decoded in a single `gsub` pass.
+The build chooses short quotes or long brackets to minimize safe string literals, without reserving the old marker characters.
+
+Before atomically replacing `nuclear.lua`, the build verifies a byte-for-byte decoding round trip,
+checks the generated Lua 5.2 syntax, and enforces the 4096-byte EEPROM limit using UTF-8 byte counts.
+Failures preserve the previous image.
 
 To run component simulations and compression regression tests:
 
 ```sh
+cargo +nightly -Zscript test --manifest-path compress.rs
 python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests
 ```
 
 The simulations run both source and EEPROM code on Lua 5.2, 5.3 and 5.4;
 they do not replace in-game reactor testing.
-
-## 1. luamin
-
-Use luamin to minify the code, renaming all local variables to single or double letters.
-
-## 2. Post-processing
-
-Replace `function`, `return`, `then `, `local `, and `end` in the luamin output with `!`, `?`, `$`, `&`, and `@` respectively, then embed the resulting text into the following skeleton code. Single-character markers avoid ambiguities such as `local end` decoding as `function`:
-
-~~~lua
-load(('the replaced text'):gsub("!","function"):gsub("%?","return"):gsub("%$","then "):gsub("&","local "):gsub("@","end"))()
-~~~
