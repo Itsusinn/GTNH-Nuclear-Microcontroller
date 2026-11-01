@@ -40,6 +40,8 @@ Note: The EEPROM has only 4 KB of storage. The source file (`nuclear_SourceCode.
 
 - The program will not start the nuclear reactor on its own; applying a redstone signal of any strength to the microcontroller will start it.
 
+- Removing the redstone control signal during operation schedules shutdown after 10 game-time seconds. Restoring the signal cancels shutdown; removing it again starts a new countdown. Checks and replacements continue during the countdown, and replacement stops are immediate.
+
 - The redstone control signal must not be passed directly to the reactor; turning the reactor on and off should be left to the microcontroller.
 
 - A single microcontroller can control multiple reactors, but **do not** let the microcontroller touch two faces of the same reactor.

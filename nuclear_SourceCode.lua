@@ -17,7 +17,7 @@ local isActive, isMEInterfaceMode, sideOutput -- 是否处于工作状态，是�
 local fuelRod, mixedFuelRod, coolantCell -- 燃料棒ID，混合棒额外燃料棒的ID，冷却单元ID
 local fuelRodSlot, mixedFuelRodSlot, coolantCellSlot = {}, {}, {} -- 燃料棒、冷却单元快照，索引为容器方向，子表索引为槽位，子表值为数量
 ]]
-local fuelRodSlot, mixedFuelRodSlot, coolantCellSlot, reactors, fuelRod, mixedFuelRod, coolantCell, isActive, isMEInterfaceMode, sideOutput = {}, {}, {}, {}
+local fuelRodSlot, mixedFuelRodSlot, coolantCellSlot, reactors, fuelRod, mixedFuelRod, coolantCell, isActive, isMEInterfaceMode, sideOutput, stopDeadline = {}, {}, {}, {}
 
 
 local redstoneMap, initializingMap = {1,[0]=0} -- 将转运器使用的绝对方向(东南西北)映射为红石卡使用的相对方向(前后左右)
@@ -335,16 +335,20 @@ while 1 do
             if not reactors[i] and redstoneInput[i] > 0 then
                 wake = not isActive
                 isActive = 1
+                stopDeadline = nil -- 恢复控制信号时取消延迟停机
                 goto BREAK
             end
         end
         wake = isActive
-        isActive = nil
-        if wake then
-            redstone_getOutput = {0,0,0,0,0,[0]=0}
-            raw_redstone_setOutput(redstone_getOutput)
+        if isActive and not stopDeadline then
+            stopDeadline = computer_uptime() + 10 -- 重复红石事件不延长倒计时
         end
         ::BREAK::
+    end
+    if stopDeadline and computer_uptime() >= stopDeadline then
+        stopDeadline, isActive, wake = nil, nil, 1
+        redstone_getOutput = {0,0,0,0,0,[0]=0}
+        raw_redstone_setOutput(redstone_getOutput)
     end
     for _, reactor in pairs(reactors) do
         reactor(wake)

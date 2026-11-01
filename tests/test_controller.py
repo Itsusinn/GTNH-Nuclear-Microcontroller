@@ -38,11 +38,67 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("SIMULATION_DONE", result.err)
         self.assertEqual(len(result.transfers), 0)
 
-    def test_stop_signal_waits_before_replacement(self):
+    def writes(self, result):
+        return [result.writes[i] for i in range(1, len(result.writes) + 1)]
+
+    def assert_delayed_shutdown(self, result, removed_at):
+        shutdowns = [write for write in self.writes(result)
+                     if write.side is None and write.value == 0]
+        self.assertEqual(len(shutdowns), 1)
+        self.assertGreaterEqual(shutdowns[0].time - removed_at, 10 - 1e-9)
+        self.assertLessEqual(shutdowns[0].time - removed_at, 10.05 + 1e-9)
+        self.assertFalse(any(write.value > 0 and write.time >= shutdowns[0].time
+                             for write in self.writes(result)))
+
+    def test_redstone_removal_delays_shutdown_ten_seconds(self):
+        result = self.run_scenario("delay_stop")
+        self.assertIn("SIMULATION_DONE", result.err)
+        self.assertTrue(any(write.value == 1 for write in self.writes(result)))
+        self.assertEqual([write.value for write in self.writes(result) if write.side == 0], [1])
+        self.assert_delayed_shutdown(result, result.inputEvents[1].time)
+
+    def test_repeated_redstone_events_do_not_extend_shutdown(self):
+        result = self.run_scenario("delay_noise")
+        self.assertIn("SIMULATION_DONE", result.err)
+        self.assertEqual(len(result.inputEvents), 4)
+        self.assert_delayed_shutdown(result, result.inputEvents[1].time)
+
+    def test_signal_restoration_cancels_shutdown_and_next_removal_restarts_timer(self):
+        result = self.run_scenario("delay_resume")
+        self.assertIn("SIMULATION_DONE", result.err)
+        self.assertEqual(len(result.inputEvents), 3)
+        self.assertEqual([write.value for write in self.writes(result) if write.side == 0], [1])
+        self.assert_delayed_shutdown(result, result.inputEvents[3].time)
+
+    def test_inactive_redstone_events_do_not_start_reactors_or_schedule_shutdown(self):
+        result = self.run_scenario("delay_idle")
+        self.assertIn("SIMULATION_DONE", result.err)
+        self.assertEqual(len(result.writes), 0)
+
+    def test_shutdown_turns_off_all_reactors_together(self):
+        result = self.run_scenario("delay_multiple")
+        self.assertIn("SIMULATION_DONE", result.err)
+        self.assert_delayed_shutdown(result, result.inputEvents[1].time)
+        removed_at = result.inputEvents[1].time
+        active = {}
+        for write in self.writes(result):
+            if write.time < removed_at and write.side is not None:
+                active[write.side] = write.value
+        self.assertEqual(active.get(3), 1)
+        self.assertEqual(active.get(4), 1)
+
+    def test_replacement_still_stops_immediately_during_shutdown_countdown(self):
         result = self.run_scenario("stop_replace")
         self.assertIn("SIMULATION_DONE", result.err)
-        self.assertGreater(len(result.transfers), 0)
-        self.assertGreaterEqual(result.transfers[1].time - result.stopped, 1)
+        removed_at = result.inputEvents[1].time
+        replacement_stop = next(write for write in self.writes(result)
+                                if write.side == 0 and write.value == 0)
+        self.assertLess(replacement_stop.time - removed_at, 1)
+        self.assertGreaterEqual(result.transfers[1].time - replacement_stop.time, 1)
+        self.assertTrue(any(write.side == 0 and write.value == 1
+                            and replacement_stop.time < write.time < removed_at + 10
+                            for write in self.writes(result)))
+        self.assert_delayed_shutdown(result, removed_at)
 
     def test_failed_direction_probe_is_reported(self):
         self.assertIn("无法识别方向", self.run_scenario("mapping_failure").err)

@@ -2,6 +2,13 @@
 local now, signals, outputs = 0, {}, {[0]=0,0,0,0,0,0}
 local inventories, transfers, writes = {}, {}, {}
 local input, stopped, injected = 0, nil, false
+local inputEvents, eventIndex = {}, 1
+local delayed = scenario:match("^delay_")
+local schedule = delayed and {{2, 0}} or {}
+if scenario == "delay_noise" then schedule = {{2, 0}, {4, 0}, {8, 0}, {11, 0}} end
+if scenario == "delay_resume" then schedule = {{2, 0}, {6, 1}, {18, 0}} end
+if scenario == "delay_idle" then schedule = {{2, 0}, {4, 0}} end
+if scenario == "delay_multiple" then schedule = {{10, 0}} end
 local supplyReads, shortageSince, replenished = {}, nil, false
 local outputCase, meOutputCase, coolantCase = scenario:match("^output_"), scenario:match("^me_output_"), scenario:match("^coolant_")
 local prefix = "gregtech:gt."
@@ -22,7 +29,7 @@ end
 inventories[1] = inventory("chest", 8, source)
 inventories[2] = inventory("chest", 8)
 local coolantSlots = {[3]=1,[6]=1,[9]=1,[10]=1,[15]=1,[22]=1,[26]=1,[29]=1,[33]=1,[40]=1,[45]=1,[46]=1,[49]=1,[52]=1}
-local horizontal = scenario:match("^mapping_")
+local horizontal = scenario:match("^mapping_") or scenario == "delay_multiple"
 local reactorSide = horizontal and 3 or 0
 local rods = {}
 for slot=1,54 do
@@ -42,7 +49,7 @@ if meOutputCase then
     for slot=3,9 do items[slot] = stack("junk") end
     inventories[5] = inventory("tile.appliedenergistics2.BlockInterface", 9, items)
 end
-if scenario == "mapping_multiple" then
+if scenario == "mapping_multiple" or scenario == "delay_multiple" then
     local other = {}
     for slot=1,54 do other[slot] = stack(rods[slot].name) end
     inventories[4] = inventory("blockReactorChamber", 54, other)
@@ -160,16 +167,23 @@ computer = {
                 end
             end
         end
-        if now > (scenario == "mapping_failure" and 20 or 8) then error("SIMULATION_DONE") end
+        if now > (delayed and 32 or scenario == "stop_replace" and 14 or scenario == "mapping_failure" and 20 or 8) then error("SIMULATION_DONE") end
+        local event = schedule[eventIndex]
+        if event and now >= event[1] then
+            input, eventIndex = event[2], eventIndex + 1
+            inputEvents[#inputEvents+1] = {time=now, value=input}
+            return "redstone_changed"
+        end
         if scenario == "stop_replace" and now > 0.5 and outputs[0] > 0 and not injected then
             injected, input = true, 0
+            inputEvents[#inputEvents+1] = {time=now, value=input}
             rods[26].damage = 100
             return "redstone_changed"
         end
         return table.remove(signals, 1)
     end,
 }
-if scenario == "stop_replace" or horizontal or outputCase or meOutputCase or coolantCase then input = 1 end
+if scenario == "stop_replace" or horizontal or outputCase or meOutputCase or coolantCase or (delayed and scenario ~= "delay_idle") then input = 1 end
 local ok, err = pcall(assert(load(firmware)))
 return {ok=ok, err=tostring(err), transfers=transfers, writes=writes, stopped=stopped,
-    supplyReads=supplyReads, shortageSince=shortageSince, time=now}
+    supplyReads=supplyReads, shortageSince=shortageSince, inputEvents=inputEvents, time=now}
