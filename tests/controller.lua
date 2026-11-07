@@ -163,11 +163,11 @@ computer = {
         now = now + (faultTime and scenario == "alarm_event_noise" and math.min(timeout, 0.05) or timeout)
         if scenario == "alarm_latched_recover" and faultTime then
             if now >= faultTime + 3 then source[3] = nil end
-            if now >= faultTime + 8 and input == 0 then
+            if now >= faultTime + 6 and input == 0 then
                 input = 1
                 inputEvents[#inputEvents+1] = {time=now, value=input}
                 return "redstone_changed"
-            elseif now >= faultTime + 4 and now < faultTime + 8 and input == 1 then
+            elseif now >= faultTime + 4 and now < faultTime + 6 and input == 1 then
                 input = 0
                 inputEvents[#inputEvents+1] = {time=now, value=input}
                 return "redstone_changed"
@@ -223,6 +223,6 @@ local running = coroutine.status(execution) == "suspended"
 if not running then -- Model loss of held outputs when firmware terminates.
     for side=0,5 do outputs[side] = 0 end
 end
-return {ok=ok, err=faultReason or tostring(err), transfers=transfers, writes=writes, stopped=stopped,
+return {ok=ok, err=tostring(err), transfers=transfers, writes=writes, stopped=stopped,
     supplyReads=supplyReads, shortageSince=shortageSince, inputEvents=inputEvents, time=now,
-    outputs=outputs, running=running, faultTime=faultTime}
+    outputs=outputs, running=running, faultTime=faultTime, faultReason=faultReason}

@@ -383,11 +383,14 @@ if not ok then
         end
     end
     pcall(computer_pushSignal, "nuclear_fault", message) -- 记录原始故障事件，组件故障不覆盖它
-    while 1 do -- 保持微控制器运行，锁定停机与报警，必须手动重启才能恢复调度
+    local alarmDeadline = computer_uptime() + 8
+    while computer_uptime() < alarmDeadline do -- 先持续报警八秒，再把原始故障交给 OC
         pcall(raw_redstone_setOutput, output) -- 持续保持输出；红石组件暂时故障后也会重试
-        local deadline = computer_uptime() + 1
+        local deadline = math.min(alarmDeadline, computer_uptime() + 1)
         repeat
             computer_pullSignal(math.max(0, deadline - computer_uptime()))
         until computer_uptime() >= deadline -- 消耗事件但不响应控制信号，且避免事件噪声引发忙循环
     end
+    pcall(raw_redstone_setOutput, {0,0,0,0,0,[0]=0}) -- 到期结束报警，所有反应堆继续保持关闭
+    er(message, 0) -- OC 记录原始错误，供分析器读取
 end

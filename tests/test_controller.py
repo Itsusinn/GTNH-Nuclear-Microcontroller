@@ -120,6 +120,14 @@ class ControllerTests(unittest.TestCase):
     def assert_never_started(self, result):
         self.assertFalse(any(write.outputs[0] > 0 for write in self.writes(result)))
 
+    def assert_fault_reported_after_eight_seconds(self, result):
+        self.assertFalse(result.ok)
+        self.assertFalse(result.running)
+        self.assertIsNotNone(result.faultTime)
+        self.assertAlmostEqual(result.time - result.faultTime, 8)
+        self.assertEqual(result.err, result.faultReason)
+        self.assertTrue(all(result.outputs[side] == 0 for side in range(6)))
+
     def test_fault_activates_alarm_after_turning_off_reactor(self):
         for scenario, message in [("output_full", "输出空间不足"),
                                   ("coolant_missing", "缺少冷却单元"),
@@ -129,51 +137,52 @@ class ControllerTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 result = self.run_scenario(scenario)
                 self.assertIn(message, result.err)
+                self.assert_fault_reported_after_eight_seconds(result)
                 self.assertEqual(result.outputs[0], 0)
-                self.assertEqual(result.outputs[1], 15)
                 writes = self.writes(result)
                 first_alarm = next(i for i, write in enumerate(writes) if write.value == 15)
                 self.assertEqual(writes[first_alarm - 1].value, 0)
+                self.assertEqual(writes[first_alarm].outputs[1], 15)
 
-    def test_fault_holds_alarm_and_keeps_reactors_off_for_thirty_seconds(self):
+    def test_fault_holds_alarm_eight_seconds_then_reports_original_error(self):
         result = self.run_scenario("alarm_running")
-        self.assertTrue(result.running)
-        self.assertIsNotNone(result.faultTime)
-        self.assertGreaterEqual(result.time - result.faultTime, 30)
+        self.assert_fault_reported_after_eight_seconds(result)
         alarms = [write for write in self.writes(result) if write.value == 15]
-        self.assertGreaterEqual(len(alarms), 30)
+        self.assertEqual(len(alarms), 8)
         self.assertLessEqual(alarms[0].time - result.faultTime, 0.05)
         for previous, current in zip(alarms, alarms[1:]):
             self.assertAlmostEqual(current.time - previous.time, 1)
         writes = self.writes(result)
         first_alarm = next(i for i, write in enumerate(writes) if write.value == 15)
-        for write in writes[first_alarm:]:
+        for write in writes[first_alarm:-1]:
             self.assertEqual(write.outputs[1], 15)
             self.assertEqual(write.outputs[0], 0)
             self.assertEqual(write.outputs[4], 0)
+        self.assertEqual(writes[-1].value, 0)
+        self.assertAlmostEqual(writes[-1].time - alarms[0].time, 8)
 
     def test_fault_latch_ignores_recovered_supplies_and_control_signals(self):
         result = self.run_scenario("alarm_latched_recover")
-        self.assertTrue(result.running)
+        self.assert_fault_reported_after_eight_seconds(result)
         self.assertIn("不支持的混合燃料棒", result.err)
         self.assertEqual([result.inputEvents[i].value for i in range(1, len(result.inputEvents) + 1)], [0, 1])
-        self.assertEqual(result.outputs[1], 15)
+        self.assertTrue(any(write.value == 15 and write.time >= result.inputEvents[2].time
+                            for write in self.writes(result)))
         self.assertEqual(result.outputs[0], 0)
         self.assertEqual(len(result.transfers), 0)
 
     def test_fault_alarm_recovers_from_temporary_redstone_failure(self):
         result = self.run_scenario("alarm_write_recover_running")
-        self.assertTrue(result.running)
+        self.assert_fault_reported_after_eight_seconds(result)
         self.assertIn("BROKEN_TRANSPOSER", result.err)
         self.assertEqual(result.outputs[0], 0)
-        self.assertEqual(result.outputs[1], 15)
+        self.assertTrue(any(write.outputs[1] == 15 for write in self.writes(result)))
 
     def test_fault_signal_noise_does_not_speed_up_output_refreshes(self):
         result = self.run_scenario("alarm_event_noise")
-        self.assertTrue(result.running)
+        self.assert_fault_reported_after_eight_seconds(result)
         alarms = [write for write in self.writes(result) if write.value == 15]
-        self.assertGreaterEqual(len(alarms), 30)
-        self.assertLessEqual(len(alarms), 31)
+        self.assertEqual(len(alarms), 8)
         for previous, current in zip(alarms, alarms[1:]):
             self.assertAlmostEqual(current.time - previous.time, 1)
 
@@ -184,22 +193,28 @@ class ControllerTests(unittest.TestCase):
             with self.subTest(scenario=scenario):
                 result = self.run_scenario(scenario)
                 self.assertIn("BROKEN_TRANSPOSER", result.err)
+                self.assert_fault_reported_after_eight_seconds(result)
                 self.assertTrue(any(all(write.outputs[side] == 1 for side in reactor_sides)
                                     for write in self.writes(result)))
-                self.assertEqual(result.outputs[1], 15)
-                for side in reactor_sides:
-                    self.assertEqual(result.outputs[side], 0)
+                for write in self.writes(result):
+                    if write.value == 15:
+                        self.assertEqual(write.outputs[1], 15)
+                        for side in reactor_sides:
+                            self.assertEqual(write.outputs[side], 0)
 
     def test_failed_probe_only_alarms_in_safe_vertical_directions(self):
         result = self.run_scenario("alarm_horizontal_probe")
         self.assertIn("无法识别方向", result.err)
-        self.assertEqual(result.outputs[1], 15)
-        for side in range(2, 6):
-            self.assertEqual(result.outputs[side], 0)
+        self.assert_fault_reported_after_eight_seconds(result)
+        for write in self.writes(result):
+            if write.value == 15:
+                self.assertEqual(write.outputs[1], 15)
+                for side in range(2, 6):
+                    self.assertEqual(write.outputs[side], 0)
 
     def test_alarm_failure_preserves_original_error(self):
         result = self.run_scenario("alarm_write_failure_running")
-        self.assertTrue(result.running)
+        self.assert_fault_reported_after_eight_seconds(result)
         self.assertIn("BROKEN_TRANSPOSER", result.err)
         self.assertNotIn("BROKEN_REDSTONE", result.err)
         self.assertNotIn("error in error handling", result.err)
