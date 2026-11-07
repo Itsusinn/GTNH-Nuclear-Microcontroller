@@ -3,6 +3,10 @@ local c1, c2, c3, er, redstone_changed = component, computer, coroutine, error, 
 local component_list, component_proxy, computer_uptime, computer_pullSignal, computer_pushSignal, coroutine_yield = c1.list, c1.proxy, c2.uptime, c2.pullSignal, c2.pushSignal, c3.yield
 local transposer, redstone = component_proxy(component_list("transposer")()), component_proxy(component_list("redstone")())
 local transposer_getAllStacks, transposer_transferItem, transposer_getStackInSlot, transposer_getInventorySize, raw_redstone_setOutput = transposer.getAllStacks, transposer.transferItem, transposer.getStackInSlot, transposer.getInventorySize, redstone.setOutput
+local reactors, redstoneMap, scanned = {}, {1,[0]=0}
+
+local function run()
+raw_redstone_setOutput({0,0,0,0,0,[0]=0}) -- 重启时清除上次故障的报警信号
 
 -- 通过 computer.shutdown(true) 来重启时不会立即 GC，OC 也不提供主动 GC 的接口，因此需要在此处等待自动 GC
 while c2.freeMemory() < 7e4 do
@@ -17,10 +21,10 @@ local isActive, isMEInterfaceMode, sideOutput -- 是否处于工作状态，是�
 local fuelRod, mixedFuelRod, coolantCell -- 燃料棒ID，混合棒额外燃料棒的ID，冷却单元ID
 local fuelRodSlot, mixedFuelRodSlot, coolantCellSlot = {}, {}, {} -- 燃料棒、冷却单元快照，索引为容器方向，子表索引为槽位，子表值为数量
 ]]
-local fuelRodSlot, mixedFuelRodSlot, coolantCellSlot, reactors, fuelRod, mixedFuelRod, coolantCell, isActive, isMEInterfaceMode, sideOutput, stopDeadline = {}, {}, {}, {}
+local fuelRodSlot, mixedFuelRodSlot, coolantCellSlot, fuelRod, mixedFuelRod, coolantCell, isActive, isMEInterfaceMode, sideOutput, stopDeadline = {}, {}, {}
 
 
-local redstoneMap, initializingMap = {1,[0]=0} -- 将转运器使用的绝对方向(东南西北)映射为红石卡使用的相对方向(前后左右)
+local initializingMap -- redstoneMap 将转运器的绝对方向映射为红石卡的相对方向
 local redstone_getOutput = {0,0,0,0,0,[0]=0} -- 已设置的红石输出值
 local function waitSecond()
     local deadline = computer_uptime() + 1
@@ -228,24 +232,26 @@ for kind, capacities in pairs({Helium={60,180,360},NaK={60,180,360},Space={180,3
     end
 end
 -- 先识别模式，再读取物品，避免 ME 接口以外的容器污染燃料类型和混合棒状态。
-local containers = {}
+local containers, startupError = {}
 for i=0,5 do
     local size = transposer_getInventorySize(i)
     local name = size and size > 0 and transposer.getInventoryName(i)
     if name == "blockReactorChamber" then
         if size < 54 then
-            er("必须为六仓反应堆")
+            startupError = "必须为六仓反应堆"
         end
         reactors[i] = 1
     elseif name == "tile.appliedenergistics2.BlockInterface" or name == "tile.fluid_interface" then
         if isMEInterfaceMode then
-            er("存在多个ME接口")
+            startupError = "存在多个ME接口"
         end
         isMEInterfaceMode, sideOutput = 0, i
     elseif name then
         containers[i] = 1
     end
 end
+scanned = true -- 完整扫描后才能确认哪些方向没有反应堆
+if startupError then er(startupError) end
 if isMEInterfaceMode then
     containers = {[sideOutput]=1}
 end
@@ -353,4 +359,29 @@ while 1 do
     for _, reactor in pairs(reactors) do
         reactor(wake)
     end
+end
+
+end
+
+local ok, message = pcall(run)
+if not ok then
+    local output = {0,0,0,0,0,[0]=0}
+    pcall(raw_redstone_setOutput, output) -- 先统一关闭，避免其它反应堆在故障后继续运行
+    if scanned then
+        for side=0,5 do
+            if not reactors[side] then
+                output[redstoneMap[side] or side] = 15
+            end
+        end
+        for side in pairs(reactors) do
+            if redstoneMap[side] then
+                output[redstoneMap[side]] = 0
+            else -- 水平朝向未确认时，所有水平方向均不得输出报警红石
+                for i=2,5 do output[i] = 0 end
+                break
+            end
+        end
+        pcall(raw_redstone_setOutput, output)
+    end
+    er(message, 0) -- 保留原始故障原因，报警失败也不覆盖它
 end

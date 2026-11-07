@@ -1,5 +1,6 @@
 -- Component simulator: no Minecraft world or server is touched.
 local now, signals, outputs = 0, {}, {[0]=0,0,0,0,0,0}
+if scenario == "alarm_reset" then outputs = {[0]=15,15,15,15,15,15} end
 local inventories, transfers, writes = {}, {}, {}
 local input, stopped, injected = 0, nil, false
 local inputEvents, eventIndex = {}, 1
@@ -30,6 +31,8 @@ inventories[1] = inventory("chest", 8, source)
 inventories[2] = inventory("chest", 8)
 local coolantSlots = {[3]=1,[6]=1,[9]=1,[10]=1,[15]=1,[22]=1,[26]=1,[29]=1,[33]=1,[40]=1,[45]=1,[46]=1,[49]=1,[52]=1}
 local horizontal = scenario:match("^mapping_") or scenario == "delay_multiple"
+if scenario:match("^alarm_horizontal") or scenario == "alarm_rotated_running" then horizontal = true end
+local relative = scenario == "alarm_rotated_running" and {[0]=0,1,4,5,3,2} or {[0]=0,1,2,3,4,5}
 local reactorSide = horizontal and 3 or 0
 local rods = {}
 for slot=1,54 do
@@ -53,6 +56,12 @@ if scenario == "mapping_multiple" or scenario == "delay_multiple" then
     local other = {}
     for slot=1,54 do other[slot] = stack(rods[slot].name) end
     inventories[4] = inventory("blockReactorChamber", 54, other)
+end
+if scenario == "alarm_startup" then source[3] = stack(prefix.."rodThorium4") end
+if scenario == "alarm_small_reactor" then inventories[reactorSide].size = 45 end
+if scenario == "alarm_running" or scenario == "alarm_horizontal_running" or scenario == "alarm_rotated_running" then
+    inventories[4] = inventory("blockReactorChamber", 54, {})
+    for slot=1,54 do inventories[4].items[slot] = stack(rods[slot].name) end
 end
 if scenario == "me_priority" or scenario == "me_stale_hybrid" then
     if scenario == "me_priority" then
@@ -79,6 +88,7 @@ function transposer.getInventoryName(side)
     return inventories[side] and inventories[side].name
 end
 function transposer.getAllStacks(side)
+    if scenario:match("running$") and now > 3 then error("BROKEN_TRANSPOSER") end
     local inv, items, index = assert(inventories[side]), {}, 0
     if (coolantCase and side == 1) or (meOutputCase and side == 5) then
         supplyReads[#supplyReads+1] = {time=now, available=inv.items[2] ~= nil}
@@ -115,19 +125,22 @@ function redstone.getInput()
     return {[0]=0,input,0,0,0,0}
 end
 function redstone.setOutput(side, value)
+    if scenario == "alarm_write_failure_running" and now > 3 then error("BROKEN_REDSTONE") end
     if type(side) == "table" then
         local previous = clone(outputs)
         for k,v in pairs(side) do
             if outputs[k] > 0 and v == 0 then stopped = now end
             outputs[k] = v
         end
-        writes[#writes+1] = {time=now, value=0}
+        local maximum = 0
+        for _,v in pairs(side) do maximum = math.max(maximum, v) end
+        writes[#writes+1] = {time=now, value=maximum, outputs=clone(outputs)}
         return previous
     end
     local previous = outputs[side]
     outputs[side] = value
     if previous > 0 and value == 0 then stopped = now end
-    writes[#writes+1] = {time=now, side=side, value=value}
+    writes[#writes+1] = {time=now, side=side, value=value, outputs=clone(outputs)}
     return previous
 end
 component = {
@@ -160,14 +173,14 @@ computer = {
         if scenario == "me_output_recover" and now >= 4.05 and not replenished then
             inventories[5].items[9], replenished = nil, true
         end
-        if horizontal and scenario ~= "mapping_failure" then
+        if (horizontal or scenario == "alarm_running") and scenario ~= "mapping_failure" and scenario ~= "alarm_horizontal_probe" then
             for side=3,4 do
-                if outputs[side] > 0 and inventories[side] then
+                if outputs[relative[side]] > 0 and inventories[side] then
                     inventories[side].items[1].tag = tostring(now)
                 end
             end
         end
-        if now > (delayed and 32 or scenario == "stop_replace" and 14 or scenario == "mapping_failure" and 20 or 8) then error("SIMULATION_DONE") end
+        if now > (delayed and 32 or scenario == "stop_replace" and 14 or scenario == "mapping_failure" and 20 or 8) then coroutine.yield("SIMULATION_DONE") end
         local event = schedule[eventIndex]
         if event and now >= event[1] then
             input, eventIndex = event[2], eventIndex + 1
@@ -183,7 +196,7 @@ computer = {
         return table.remove(signals, 1)
     end,
 }
-if scenario == "stop_replace" or horizontal or outputCase or meOutputCase or coolantCase or (delayed and scenario ~= "delay_idle") then input = 1 end
-local ok, err = pcall(assert(load(firmware)))
+if scenario == "stop_replace" or horizontal or scenario == "alarm_running" or scenario == "alarm_write_failure_running" or outputCase or meOutputCase or coolantCase or (delayed and scenario ~= "delay_idle") then input = 1 end
+local ok, err = coroutine.resume(coroutine.create(assert(load(firmware))))
 return {ok=ok, err=tostring(err), transfers=transfers, writes=writes, stopped=stopped,
-    supplyReads=supplyReads, shortageSince=shortageSince, inputEvents=inputEvents, time=now}
+    supplyReads=supplyReads, shortageSince=shortageSince, inputEvents=inputEvents, time=now, outputs=outputs}

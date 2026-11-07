@@ -43,7 +43,7 @@ class ControllerTests(unittest.TestCase):
 
     def assert_delayed_shutdown(self, result, removed_at):
         shutdowns = [write for write in self.writes(result)
-                     if write.side is None and write.value == 0]
+                     if write.side is None and write.value == 0 and write.time > 0]
         self.assertEqual(len(shutdowns), 1)
         self.assertGreaterEqual(shutdowns[0].time - removed_at, 10 - 1e-9)
         self.assertLessEqual(shutdowns[0].time - removed_at, 10.05 + 1e-9)
@@ -73,7 +73,7 @@ class ControllerTests(unittest.TestCase):
     def test_inactive_redstone_events_do_not_start_reactors_or_schedule_shutdown(self):
         result = self.run_scenario("delay_idle")
         self.assertIn("SIMULATION_DONE", result.err)
-        self.assertEqual(len(result.writes), 0)
+        self.assertFalse(any(write.value > 0 for write in self.writes(result)))
 
     def test_shutdown_turns_off_all_reactors_together(self):
         result = self.run_scenario("delay_multiple")
@@ -118,7 +118,59 @@ class ControllerTests(unittest.TestCase):
             self.assertGreaterEqual(later - earlier, 1 - 1e-9)
 
     def assert_never_started(self, result):
-        self.assertFalse(any(result.writes[i].value > 0 for i in range(1, len(result.writes) + 1)))
+        self.assertFalse(any(write.outputs[0] > 0 for write in self.writes(result)))
+
+    def test_fault_activates_alarm_after_turning_off_reactor(self):
+        for scenario, message in [("output_full", "输出空间不足"),
+                                  ("coolant_missing", "缺少冷却单元"),
+                                  ("me_output_full", "输出空间不足"),
+                                  ("alarm_small_reactor", "必须为六仓反应堆"),
+                                  ("alarm_startup", "不支持的混合燃料棒")]:
+            with self.subTest(scenario=scenario):
+                result = self.run_scenario(scenario)
+                self.assertIn(message, result.err)
+                self.assertEqual(result.outputs[0], 0)
+                self.assertEqual(result.outputs[1], 15)
+                self.assertEqual(self.writes(result)[-2].value, 0)
+
+    def test_runtime_component_error_stops_all_reactors_and_alarms(self):
+        for scenario, reactor_sides in [("alarm_running", [0, 4]),
+                                        ("alarm_horizontal_running", [3, 4]),
+                                        ("alarm_rotated_running", [5, 3])]:
+            with self.subTest(scenario=scenario):
+                result = self.run_scenario(scenario)
+                self.assertIn("BROKEN_TRANSPOSER", result.err)
+                self.assertTrue(any(all(write.outputs[side] == 1 for side in reactor_sides)
+                                    for write in self.writes(result)))
+                self.assertEqual(result.outputs[1], 15)
+                for side in reactor_sides:
+                    self.assertEqual(result.outputs[side], 0)
+
+    def test_failed_probe_only_alarms_in_safe_vertical_directions(self):
+        result = self.run_scenario("alarm_horizontal_probe")
+        self.assertIn("无法识别方向", result.err)
+        self.assertEqual(result.outputs[1], 15)
+        for side in range(2, 6):
+            self.assertEqual(result.outputs[side], 0)
+
+    def test_alarm_failure_preserves_original_error(self):
+        result = self.run_scenario("alarm_write_failure_running")
+        self.assertIn("BROKEN_TRANSPOSER", result.err)
+        self.assertNotIn("BROKEN_REDSTONE", result.err)
+        self.assertNotIn("error in error handling", result.err)
+
+    def test_restart_clears_alarm_output(self):
+        result = self.run_scenario("alarm_reset")
+        self.assertIn("SIMULATION_DONE", result.err)
+        self.assertTrue(all(result.outputs[side] == 0 for side in range(6)))
+
+    def test_normal_stops_and_successful_retries_do_not_alarm(self):
+        for scenario in ["delay_stop", "stop_replace", "output_recover",
+                         "coolant_recover", "me_output_recover"]:
+            with self.subTest(scenario=scenario):
+                result = self.run_scenario(scenario)
+                self.assertIn("SIMULATION_DONE", result.err)
+                self.assertFalse(any(write.value == 15 for write in self.writes(result)))
 
     def test_full_output_stops_after_three_retries(self):
         result = self.run_scenario("output_full")
