@@ -3,6 +3,7 @@ local now, signals, outputs = 0, {}, {[0]=0,0,0,0,0,0}
 if scenario == "alarm_reset" then outputs = {[0]=15,15,15,15,15,15} end
 local inventories, transfers, writes = {}, {}, {}
 local input, stopped, injected = 0, nil, false
+local faultReason, faultTime
 local inputEvents, eventIndex = {}, 1
 local delayed = scenario:match("^delay_")
 local schedule = delayed and {{2, 0}} or {}
@@ -58,6 +59,7 @@ if scenario == "mapping_multiple" or scenario == "delay_multiple" then
     inventories[4] = inventory("blockReactorChamber", 54, other)
 end
 if scenario == "alarm_startup" then source[3] = stack(prefix.."rodThorium4") end
+if scenario == "alarm_latched_recover" or scenario == "alarm_event_noise" then source[3] = stack(prefix.."rodThorium4") end
 if scenario == "alarm_small_reactor" then inventories[reactorSide].size = 45 end
 if scenario == "alarm_running" or scenario == "alarm_horizontal_running" or scenario == "alarm_rotated_running" then
     inventories[4] = inventory("blockReactorChamber", 54, {})
@@ -126,6 +128,7 @@ function redstone.getInput()
 end
 function redstone.setOutput(side, value)
     if scenario == "alarm_write_failure_running" and now > 3 then error("BROKEN_REDSTONE") end
+    if scenario == "alarm_write_recover_running" and now > 3 and now < 6 then error("BROKEN_REDSTONE") end
     if type(side) == "table" then
         local previous = clone(outputs)
         for k,v in pairs(side) do
@@ -150,10 +153,26 @@ component = {
 computer = {
     freeMemory=function() return 100000 end,
     uptime=function() return now end,
-    pushSignal=function(signal) signals[#signals+1] = signal end,
+    pushSignal=function(signal, reason)
+        signals[#signals+1] = signal
+        if signal == "nuclear_fault" then faultReason, faultTime = tostring(reason), now end
+    end,
     shutdown=function() error("UNEXPECTED_REBOOT") end,
     pullSignal=function(timeout)
-        now = now + timeout
+        if #signals > 0 then return table.remove(signals, 1) end
+        now = now + (faultTime and scenario == "alarm_event_noise" and math.min(timeout, 0.05) or timeout)
+        if scenario == "alarm_latched_recover" and faultTime then
+            if now >= faultTime + 3 then source[3] = nil end
+            if now >= faultTime + 8 and input == 0 then
+                input = 1
+                inputEvents[#inputEvents+1] = {time=now, value=input}
+                return "redstone_changed"
+            elseif now >= faultTime + 4 and now < faultTime + 8 and input == 1 then
+                input = 0
+                inputEvents[#inputEvents+1] = {time=now, value=input}
+                return "redstone_changed"
+            end
+        end
         if coolantCase and not injected then
             source[2], injected = nil, true
         end
@@ -180,7 +199,8 @@ computer = {
                 end
             end
         end
-        if now > (delayed and 32 or scenario == "stop_replace" and 14 or scenario == "mapping_failure" and 20 or 8) then coroutine.yield("SIMULATION_DONE") end
+        if now > (faultTime and faultTime + 30 or delayed and 32 or scenario == "stop_replace" and 14 or scenario == "mapping_failure" and 20 or 8) then coroutine.yield("SIMULATION_DONE") end
+        if faultTime and scenario == "alarm_event_noise" then return "redstone_changed" end
         local event = schedule[eventIndex]
         if event and now >= event[1] then
             input, eventIndex = event[2], eventIndex + 1
@@ -196,7 +216,13 @@ computer = {
         return table.remove(signals, 1)
     end,
 }
-if scenario == "stop_replace" or horizontal or scenario == "alarm_running" or scenario == "alarm_write_failure_running" or outputCase or meOutputCase or coolantCase or (delayed and scenario ~= "delay_idle") then input = 1 end
-local ok, err = coroutine.resume(coroutine.create(assert(load(firmware))))
-return {ok=ok, err=tostring(err), transfers=transfers, writes=writes, stopped=stopped,
-    supplyReads=supplyReads, shortageSince=shortageSince, inputEvents=inputEvents, time=now, outputs=outputs}
+if scenario == "stop_replace" or horizontal or scenario == "alarm_running" or scenario == "alarm_latched_recover" or scenario == "alarm_write_failure_running" or scenario == "alarm_write_recover_running" or outputCase or meOutputCase or coolantCase or (delayed and scenario ~= "delay_idle") then input = 1 end
+local execution = coroutine.create(assert(load(firmware)))
+local ok, err = coroutine.resume(execution)
+local running = coroutine.status(execution) == "suspended"
+if not running then -- Model loss of held outputs when firmware terminates.
+    for side=0,5 do outputs[side] = 0 end
+end
+return {ok=ok, err=faultReason or tostring(err), transfers=transfers, writes=writes, stopped=stopped,
+    supplyReads=supplyReads, shortageSince=shortageSince, inputEvents=inputEvents, time=now,
+    outputs=outputs, running=running, faultTime=faultTime}

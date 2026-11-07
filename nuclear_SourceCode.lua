@@ -381,7 +381,13 @@ if not ok then
                 break
             end
         end
-        pcall(raw_redstone_setOutput, output)
     end
-    er(message, 0) -- 保留原始故障原因，报警失败也不覆盖它
+    pcall(computer_pushSignal, "nuclear_fault", message) -- 记录原始故障事件，组件故障不覆盖它
+    while 1 do -- 保持微控制器运行，锁定停机与报警，必须手动重启才能恢复调度
+        pcall(raw_redstone_setOutput, output) -- 持续保持输出；红石组件暂时故障后也会重试
+        local deadline = computer_uptime() + 1
+        repeat
+            computer_pullSignal(math.max(0, deadline - computer_uptime()))
+        until computer_uptime() >= deadline -- 消耗事件但不响应控制信号，且避免事件噪声引发忙循环
+    end
 end

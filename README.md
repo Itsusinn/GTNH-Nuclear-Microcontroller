@@ -34,15 +34,15 @@ Note: The EEPROM has only 4 KB of storage. The source file (`nuclear_SourceCode.
 
 - The microcontroller requires power (it can be powered via an ME Interface).
 
-- If an unexpected condition is detected, the program will throw an error and exit, and the front indicator light will flash red.
+- An unexpected condition latches a fault: reactor scheduling stops, while the microcontroller keeps running to hold the alarm output. Fix the fault, then restart the controller manually. Removing or restoring the control signal does not clear the latch. Since the program remains running, this state does not trigger the front indicator's program-error flashing.
 
-- Before exiting on a fault, the controller first turns off all reactors, then emits a strength-15 redstone signal toward sides confirmed to have no reactor. Place an IC2 Nuclear Control Howler Alarm next to the controller, or connect it through a dedicated redstone circuit. Restarting the program clears the alarm output. Normal control-signal shutdowns, replacements and retry waits do not emit this alarm signal.
+- On a fault, the controller first turns off all reactors, then continuously holds a strength-15 redstone signal toward sides confirmed to have no reactor. Place an IC2 Nuclear Control Howler Alarm next to the controller, or connect it through a dedicated redstone circuit. Outputs are reapplied every game-time second without clearing them between writes; temporary redstone failures are retried. Restarting the program clears the alarm output. Normal control-signal shutdowns, replacements and retry waits do not emit this alarm signal.
 
 - Prefer an alarm above or below the controller, on a side without a reactor. Until horizontal orientation is identified, fault handling only enables safe vertical sides. Horizontal alarms may also briefly sound during the initial orientation probes. Keep alarm wiring separate from reactors and other independently controlled devices: all confirmed non-reactor sides emit a signal on a fault.
 
 - Alarming requires controller power and a working redstone component. Power loss, redstone failure, or a component failure before the inventory scan finishes cannot guarantee an alarm. Before that scan completes, fault handling only attempts to turn off all outputs.
 
-- During replacement, insufficient output space (including a full ME Interface) or a shortage of usable coolant cells triggers up to three retries after the initial failure, one game-time second apart. The affected reactor stays off while waiting. If the issue persists after the third retry, the program exits with an error; successful replacement is checked again before restarting the reactor.
+- During replacement, insufficient output space (including a full ME Interface) or a shortage of usable coolant cells triggers up to three retries after the initial failure, one game-time second apart. The affected reactor stays off while waiting. If the issue persists after the third retry, the controller latches a fault and holds the alarm output. Successful replacement during the retries is checked again before restarting the reactor.
 
 - The program will not start the nuclear reactor on its own; applying a redstone signal of any strength to the microcontroller will start it.
 

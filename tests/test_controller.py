@@ -131,7 +131,51 @@ class ControllerTests(unittest.TestCase):
                 self.assertIn(message, result.err)
                 self.assertEqual(result.outputs[0], 0)
                 self.assertEqual(result.outputs[1], 15)
-                self.assertEqual(self.writes(result)[-2].value, 0)
+                writes = self.writes(result)
+                first_alarm = next(i for i, write in enumerate(writes) if write.value == 15)
+                self.assertEqual(writes[first_alarm - 1].value, 0)
+
+    def test_fault_holds_alarm_and_keeps_reactors_off_for_thirty_seconds(self):
+        result = self.run_scenario("alarm_running")
+        self.assertTrue(result.running)
+        self.assertIsNotNone(result.faultTime)
+        self.assertGreaterEqual(result.time - result.faultTime, 30)
+        alarms = [write for write in self.writes(result) if write.value == 15]
+        self.assertGreaterEqual(len(alarms), 30)
+        self.assertLessEqual(alarms[0].time - result.faultTime, 0.05)
+        for previous, current in zip(alarms, alarms[1:]):
+            self.assertAlmostEqual(current.time - previous.time, 1)
+        writes = self.writes(result)
+        first_alarm = next(i for i, write in enumerate(writes) if write.value == 15)
+        for write in writes[first_alarm:]:
+            self.assertEqual(write.outputs[1], 15)
+            self.assertEqual(write.outputs[0], 0)
+            self.assertEqual(write.outputs[4], 0)
+
+    def test_fault_latch_ignores_recovered_supplies_and_control_signals(self):
+        result = self.run_scenario("alarm_latched_recover")
+        self.assertTrue(result.running)
+        self.assertIn("不支持的混合燃料棒", result.err)
+        self.assertEqual([result.inputEvents[i].value for i in range(1, len(result.inputEvents) + 1)], [0, 1])
+        self.assertEqual(result.outputs[1], 15)
+        self.assertEqual(result.outputs[0], 0)
+        self.assertEqual(len(result.transfers), 0)
+
+    def test_fault_alarm_recovers_from_temporary_redstone_failure(self):
+        result = self.run_scenario("alarm_write_recover_running")
+        self.assertTrue(result.running)
+        self.assertIn("BROKEN_TRANSPOSER", result.err)
+        self.assertEqual(result.outputs[0], 0)
+        self.assertEqual(result.outputs[1], 15)
+
+    def test_fault_signal_noise_does_not_speed_up_output_refreshes(self):
+        result = self.run_scenario("alarm_event_noise")
+        self.assertTrue(result.running)
+        alarms = [write for write in self.writes(result) if write.value == 15]
+        self.assertGreaterEqual(len(alarms), 30)
+        self.assertLessEqual(len(alarms), 31)
+        for previous, current in zip(alarms, alarms[1:]):
+            self.assertAlmostEqual(current.time - previous.time, 1)
 
     def test_runtime_component_error_stops_all_reactors_and_alarms(self):
         for scenario, reactor_sides in [("alarm_running", [0, 4]),
@@ -155,6 +199,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_alarm_failure_preserves_original_error(self):
         result = self.run_scenario("alarm_write_failure_running")
+        self.assertTrue(result.running)
         self.assertIn("BROKEN_TRANSPOSER", result.err)
         self.assertNotIn("BROKEN_REDSTONE", result.err)
         self.assertNotIn("error in error handling", result.err)
